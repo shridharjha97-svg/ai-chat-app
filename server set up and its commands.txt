@@ -1,0 +1,48 @@
+ # Create a TXT file containing commands to run the AI chatbot project locally
+
+import pypandoc
+
+text = """
+AI Chatbot Project – Local Run Instructions
+
+1. Install Node.js
+Download and install Node.js from:
+https://nodejs.org
+
+Verify installation:
+node -v
+npm -v
+
+2. Open Terminal / Command Prompt
+
+3. Navigate to the project folder:
+cd AI-Chatbot
+
+4. Install required dependencies:
+npm install
+
+If there is no package.json, install manually:
+npm install express cors multer dotenv groq-sdk
+
+5. Create a .env file in the project folder and add:
+
+GROQ_API_KEY=your_groq_api_key
+SARVAM_API_KEY=your_sarvam_api_key
+PORT=3000
+
+6. Start the backend server:
+node server.js
+
+(Optional for development)
+npx nodemon server.js
+
+7. Open your browser and go to:
+http://localhost:3000
+
+Your AI chatbot should now be running locally.
+"""
+
+output_path = "/mnt/data/run_ai_chatbot_locally.txt"
+pypandoc.convert_text(text, 'plain', format='md', outputfile=output_path, extra_args=['--standalone'])
+
+output_path
