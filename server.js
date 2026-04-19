@@ -1,4 +1,6 @@
-require("dotenv").config();
+if (process.env.VERCEL !== "1") {
+  require("dotenv").config();
+}
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
