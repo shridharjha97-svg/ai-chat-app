@@ -173,6 +173,23 @@ function showProfileMsg(msg, type) {
   setTimeout(() => { el.className = "profile-msg"; }, 3500);
 }
 
+async function getAuthHeaders(extraHeaders = {}) {
+  const user = auth.currentUser;
+  if (!user) throw new Error("Not authenticated");
+  const token = await user.getIdToken();
+  return {
+    ...extraHeaders,
+    Authorization: `Bearer ${token}`
+  };
+}
+
+async function handleUnauthorized(res) {
+  if (res.status !== 401) return false;
+  await signOut(auth);
+  window.location.href = "login.html";
+  return true;
+}
+
 /* ═══════════════════════════════════════════════════
 CHAT
 ═══════════════════════════════════════════════════ */
@@ -217,11 +234,14 @@ async function sendMessage() {
   attachBubbleTilt(bubble);
 
   try {
+    const headers = await getAuthHeaders({ "Content-Type": "application/json" });
     const res = await fetch("/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ message })
     });
+    if (await handleUnauthorized(res)) return;
+    if (!res.ok || !res.body) throw new Error("Chat failed");
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     while (true) {
@@ -717,7 +737,9 @@ async function processVoiceAudio(audioBlob, mimeType) {
   try {
     const formData = new FormData();
     formData.append("audio", audioBlob, "recording.webm");
-    const sttRes = await fetch("/stt", { method: "POST", body: formData });
+    const sttHeaders = await getAuthHeaders();
+    const sttRes = await fetch("/stt", { method: "POST", headers: sttHeaders, body: formData });
+    if (await handleUnauthorized(sttRes)) return;
     if (!sttRes.ok) throw new Error("STT failed");
     const { transcript } = await sttRes.json();
     if (!transcript?.trim()) {
@@ -729,11 +751,13 @@ async function processVoiceAudio(audioBlob, mimeType) {
     if (!currentChatId) createNewChat();
     addMessage(transcript, "user");
 
+    const chatHeaders = await getAuthHeaders({ "Content-Type": "application/json" });
     const chatRes = await fetch("/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: chatHeaders,
       body: JSON.stringify({ message: transcript })
     });
+    if (await handleUnauthorized(chatRes)) return;
     if (!chatRes.ok) throw new Error("Chat failed");
 
     const div = document.createElement("div");
@@ -769,11 +793,13 @@ async function speakReply(text) {
   if (!isVoiceActive) return;
   setVoiceState("speaking");
   try {
+    const ttsHeaders = await getAuthHeaders({ "Content-Type": "application/json" });
     const ttsRes = await fetch("/tts", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: ttsHeaders,
       body: JSON.stringify({ text })
     });
+    if (await handleUnauthorized(ttsRes)) return;
     if (!ttsRes.ok) throw new Error("TTS failed");
     const { audio: audioBase64 } = await ttsRes.json();
     if (!audioBase64) return;

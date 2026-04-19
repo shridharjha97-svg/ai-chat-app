@@ -7,6 +7,66 @@ const Groq = require("groq-sdk");
 const multer = require("multer");
 const axios = require("axios");
 const FormData = require("form-data");
+const admin = require("firebase-admin");
+
+const isProduction = process.env.NODE_ENV === "production";
+const requireAuth = process.env.REQUIRE_AUTH === "false" ? false : isProduction;
+
+const firebaseProjectId = process.env.FIREBASE_PROJECT_ID;
+const firebaseClientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+const firebasePrivateKey = process.env.FIREBASE_PRIVATE_KEY
+  ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
+  : null;
+
+if (
+  firebaseProjectId &&
+  firebaseClientEmail &&
+  firebasePrivateKey &&
+  !admin.apps.length
+) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: firebaseProjectId,
+      clientEmail: firebaseClientEmail,
+      privateKey: firebasePrivateKey
+    })
+  });
+}
+
+const firebaseAuth = admin.apps.length ? admin.auth() : null;
+
+function logInternalError(label, error) {
+  if (isProduction) {
+    console.error(`${label}: internal failure`);
+    return;
+  }
+
+  console.error(label, error?.response?.data || error?.message || error);
+}
+
+async function verifyFirebaseToken(req, res, next) {
+  if (!requireAuth) return next();
+
+  if (!firebaseAuth) {
+    return res.status(503).json({ error: "Auth service is not configured." });
+  }
+
+  const authHeader = req.headers.authorization || "";
+  const [scheme, token] = authHeader.split(" ");
+
+  if (scheme !== "Bearer" || !token) {
+    return res.status(401).json({ error: "Unauthorized." });
+  }
+
+  try {
+    const decoded = await firebaseAuth.verifyIdToken(token, true);
+    req.user = decoded;
+    return next();
+  } catch (error) {
+    logInternalError("Auth verification error", error);
+    return res.status(401).json({ error: "Invalid or expired token." });
+  }
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -15,6 +75,10 @@ const upload = multer({
 
 const app = express();
 
+// Needed for accurate client IP behind Vercel/Render proxy.
+app.set("trust proxy", 1);
+app.disable("x-powered-by");
+
 /* ================= SECURITY HEADERS (Helmet) ================= */
 app.use(helmet({
   contentSecurityPolicy: false // keep false so your frontend scripts load fine
@@ -22,19 +86,28 @@ app.use(helmet({
 
 /* ================= CORS — only allow YOUR website ================= */
 const allowedOrigins = [
-  process.env.FRONTEND_URL,   // set this in Render env vars = your Render URL
-  "http://localhost:3000"     // for local development
+  process.env.FRONTEND_URL,
+  ...(process.env.FRONTEND_URLS || "").split(",").map((s) => s.trim()),
+  ...(!isProduction ? ["http://localhost:3000"] : [])
 ].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
-    // allow requests with no origin (like mobile apps, Postman during dev)
-    if (!origin || allowedOrigins.includes(origin)) {
+    // In production, block no-origin requests to reduce abuse.
+    if (!origin) {
+      return isProduction
+        ? callback(new Error("Origin required"))
+        : callback(null, true);
+    }
+
+    if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
       callback(new Error("Not allowed by CORS"));
     }
-  }
+  },
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
 /* ================= BODY SIZE LIMIT ================= */
@@ -66,8 +139,12 @@ const groq = new Groq({
 });
 
 /* ================= CHAT ROUTE (Groq - Streaming) ================= */
-app.post("/chat", chatLimiter, async (req, res) => {
+app.post("/chat", verifyFirebaseToken, chatLimiter, async (req, res) => {
   try {
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(503).send("AI service is not configured.");
+    }
+
     const userMessage = req.body.message;
 
     if (!userMessage || typeof userMessage !== "string") {
@@ -115,7 +192,7 @@ app.post("/chat", chatLimiter, async (req, res) => {
 
     res.end();
   } catch (error) {
-    console.error(error);
+    logInternalError("Chat error", error);
     if (!res.headersSent) {
       res.status(500).send("Server error.");
     } else {
@@ -125,9 +202,16 @@ app.post("/chat", chatLimiter, async (req, res) => {
 });
 
 /* ================= STT ROUTE (Sarvam AI) ================= */
-app.post("/stt", voiceLimiter, upload.single("audio"), async (req, res) => {
+app.post("/stt", verifyFirebaseToken, voiceLimiter, upload.single("audio"), async (req, res) => {
   try {
+    if (!process.env.SARVAM_API_KEY) {
+      return res.status(503).json({ error: "STT service is not configured." });
+    }
+
     if (!req.file) return res.status(400).json({ error: "No audio file provided." });
+    if (!req.file.mimetype || !req.file.mimetype.startsWith("audio/")) {
+      return res.status(400).json({ error: "Only audio files are allowed." });
+    }
 
     const form = new FormData();
     form.append("file", req.file.buffer, {
@@ -151,16 +235,22 @@ app.post("/stt", voiceLimiter, upload.single("audio"), async (req, res) => {
     const transcript = response.data?.transcript || "";
     res.json({ transcript });
   } catch (error) {
-    console.error("STT error:", error?.response?.data || error.message);
+    logInternalError("STT error", error);
     res.status(500).json({ error: "STT failed." });
   }
 });
 
 /* ================= TTS ROUTE (Sarvam AI) ================= */
-app.post("/tts", voiceLimiter, express.json({ limit: "5kb" }), async (req, res) => {
+app.post("/tts", verifyFirebaseToken, voiceLimiter, express.json({ limit: "5kb" }), async (req, res) => {
   try {
+    if (!process.env.SARVAM_API_KEY) {
+      return res.status(503).json({ error: "TTS service is not configured." });
+    }
+
     const { text } = req.body;
-    if (!text) return res.status(400).json({ error: "No text provided." });
+    if (!text || typeof text !== "string") {
+      return res.status(400).json({ error: "No text provided." });
+    }
 
     const truncated = text.slice(0, 500);
 
@@ -191,18 +281,26 @@ app.post("/tts", voiceLimiter, express.json({ limit: "5kb" }), async (req, res) 
 
     res.json({ audio: audioBase64 });
   } catch (error) {
-    console.error("TTS error:", error?.response?.data || error.message);
+    logInternalError("TTS error", error);
     res.status(500).json({ error: "TTS failed." });
   }
 });
 
 /* ================= GLOBAL ERROR HANDLER ================= */
 app.use((err, req, res, next) => {
-  console.error(err.message);
+  if (!isProduction) {
+    console.error(err.message);
+  }
   res.status(500).json({ error: "Something went wrong." });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-});
+
+// Start server only in local/dev execution. Vercel will use exported app.
+if (process.env.VERCEL !== "1") {
+  app.listen(PORT, () => {
+    console.log(`Server running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
