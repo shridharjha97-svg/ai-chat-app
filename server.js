@@ -90,17 +90,14 @@ app.use(helmet({
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   ...(process.env.FRONTEND_URLS || "").split(",").map((s) => s.trim()),
+  "https://ai-chat-app-uapo.vercel.app",
   ...(!isProduction ? ["http://localhost:3000"] : [])
 ].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
-    // In production, block no-origin requests to reduce abuse.
-    if (!origin) {
-      return isProduction
-        ? callback(new Error("Origin required"))
-        : callback(null, true);
-    }
+    // Allow no-origin requests (same-origin / server-to-server)
+    if (!origin) return callback(null, true);
 
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
